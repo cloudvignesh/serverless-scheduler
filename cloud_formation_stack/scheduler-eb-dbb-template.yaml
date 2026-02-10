@@ -1,0 +1,243 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Transform: AWS::Serverless-2016-10-31
+Description: Serverless Scheduler with Amazon EventBridge, AWS Lambda, and Amazon DynamoDB
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Scheduler Configuration"
+        Parameters:
+          - DynamoDBTableName
+          - EventBusName
+          - JobsLogGroupName
+    ParameterLabels:
+      DynamoDBTableName:
+        default: DynamoDB Table Name
+      EventBusName:
+        default: EventBridge Event Bus Name
+      JobsLogGroupName:
+        default: CloudWatch Group Name for Jobs Logs
+
+Parameters:
+  DynamoDBTableName:
+    Type: String
+    Description: Scheduled jobs are stored here.
+    Default: "JobsTable"
+    AllowedPattern: "[a-zA-Z0-9_\\-\\.]+"
+    ConstraintDescription: Must match the pattern [a-zA-Z0-9_\-\.]+
+  EventBusName:
+    Type: String
+    Description: Is used to distribute due jobs.
+    Default: "JobsDistributionBus"
+    AllowedPattern: "[A-Za-z0-9_\\-\\./]+"
+    ConstraintDescription: Must match the pattern [A-Za-z0-9_\-\./]+
+  JobsLogGroupName:
+    Type: String
+    Default: "/jobs/debug"
+    Description: To store logs about distributed jobs for debug purposes.
+    AllowedPattern: "[#a-zA-Z0-9_\\-\\./]+"
+    ConstraintDescription: Must match the pattern [#a-zA-Z0-9_\-\./]+
+
+# More info about Globals: https://github.com/awslabs/serverless-application-model/blob/master/docs/globals.rst
+Resources:
+  SchedulerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.9
+      Timeout: 60
+      MemorySize: 512
+      Environment:
+        Variables:
+          TABLE_NAME: !Ref DynamoDBTableName
+          EVENT_BRIDGE_NAME: !Ref EventBusName
+      Policies:
+        - DynamoDBCrudPolicy:
+            TableName: !Ref DynamoDBTableName
+        - EventBridgePutEventsPolicy:
+            EventBusName: !Ref EventBusName
+      Events:
+        DispatchJobs:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 minute)
+      InlineCode: |
+        from os import environ
+        from boto3 import resource, client
+        from boto3.dynamodb.conditions import Key
+        from datetime import timedelta
+        from decimal import Decimal
+        import json
+        import dateutil.parser
+
+        # This is used to calculate the partition key, based of the current time, to find scheduled jobs correctly
+        partition_interval_in_minutes = 5
+
+        dynamodb_table = resource('dynamodb').Table(environ['TABLE_NAME'])
+        eventbridge_client = client('events')
+
+
+        def lambda_handler(event, context):
+            event_time_in_utc = event['time']
+            previous_partition, current_partition = get_partitions(event_time_in_utc)
+
+            previous_jobs = query_jobs(previous_partition, event_time_in_utc)
+            current_jobs = query_jobs(current_partition, event_time_in_utc)
+            all_jobs = previous_jobs + current_jobs
+
+            print('dispatching {} jobs'.format(len(all_jobs)))
+
+            put_all_jobs_into_event_bridge(all_jobs)
+            delete_all_jobs(all_jobs)
+
+            print('dispatched and deleted {} jobs'.format(len(all_jobs)))
+
+
+        def put_all_jobs_into_event_bridge(jobs):
+            for job in jobs:
+                eventbridge_client.put_events(
+                    Entries=[
+                        {
+                            'DetailType': job['detail_type'],
+                            'Detail': convert_dynamodb_object_to_json(job['detail']),
+                            'Source': 'Scheduler',
+                            'EventBusName': environ['EVENT_BRIDGE_NAME'],
+                        }
+                    ]
+                )
+
+
+        def delete_all_jobs(all_jobs):
+            for job in all_jobs:
+                dynamodb_table.delete_item(
+                    Key={
+                        'pk': job['pk'],
+                        'sk': job['sk']
+                    }
+                )
+
+
+        def query_jobs(pk, upper_bound_sk):
+            response = dynamodb_table.query(
+                KeyConditionExpression=Key('pk').eq(
+                    'j#' + pk) & Key('sk').lte(upper_bound_sk),
+            )
+            return response['Items']
+
+
+        # calculate the previous and current partitions based on the event time and partition interval
+        def get_partitions(event_time_in_utc):
+            date_hour, strminute, *_ = event_time_in_utc.split(':')
+            minute = int(strminute)
+            current_partition = f'{date_hour}:{(minute - minute % partition_interval_in_minutes):02d}'
+            current_partition_date_time = dateutil.parser.parse(current_partition)
+            previous_partition_date_time = current_partition_date_time - \
+                timedelta(minutes=partition_interval_in_minutes)
+            previous_partition = previous_partition_date_time.strftime(
+                '%Y-%m-%dT%H:%M')
+
+            return previous_partition, current_partition
+
+
+        def convert_dynamodb_object_to_json(value):
+            return json.dumps(value, cls=DynamoDBTypeEncoder)
+
+
+        class DynamoDBTypeEncoder(json.JSONEncoder):
+            def default(self, obj):
+                if isinstance(obj, Decimal):
+                    if obj % 1 > 0:
+                        return float(obj)
+                    else:
+                        return int(obj)
+                if isinstance(obj, set):
+                    return list(obj)
+                return super(DynamoDBTypeEncoder, self).default(obj)
+
+  # making sure that logs will be deleted when the stack is deleted
+  SchedulerFunctionLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub /aws/lambda/${SchedulerFunction}
+      RetentionInDays: 7
+
+  JobsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Ref DynamoDBTableName
+      AttributeDefinitions:
+        - AttributeName: pk
+          AttributeType: S
+        - AttributeName: sk
+          AttributeType: S
+      KeySchema:
+        - AttributeName: pk
+          KeyType: HASH
+        - AttributeName: sk
+          KeyType: RANGE
+      BillingMode: PAY_PER_REQUEST
+
+  JobDistributionEventBus:
+    Type: AWS::Events::EventBus
+    Properties:
+      Name: !Ref EventBusName
+
+  JobsLoggingRule:
+    Type: AWS::Events::Rule
+    DependsOn: JobDistributionEventBus
+    Properties:
+      Description: "Log Jobs from EventBridge to CloudWatch Logs"
+      EventBusName: !Ref EventBusName
+      EventPattern:
+        source:
+          - "Scheduler"
+        account:
+          - !Ref AWS::AccountId
+      State: ENABLED
+      Targets:
+        - Id: SchedulerToCloudWatchLogs
+          Arn: !GetAtt LogGroupForJobs.Arn
+
+  LogGroupForJobs:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Ref JobsLogGroupName
+      RetentionInDays: 7
+
+  LogGroupForJobsPolicy:
+    Type: AWS::Logs::ResourcePolicy
+    Properties:
+      PolicyName: !Sub "EventBridgeToCWLogsPolicy-${EventBusName}"
+      PolicyDocument: !Sub
+        - >
+          {
+            "Version": "2012-10-17",
+            "Statement": [
+              {
+                "Sid": "EventBridgeToCWLogsPolicy",
+                "Effect": "Allow",
+                "Principal": {
+                  "Service": [
+                    "delivery.logs.amazonaws.com",
+                    "events.amazonaws.com"
+                  ]
+                },
+                "Action": [
+                  "logs:CreateLogStream",
+                  "logs:PutLogEvents"
+                ],
+                "Resource": [
+                  "${logArn}"
+                ]
+              }
+            ]
+          }
+        - { logArn: !GetAtt LogGroupForJobs.Arn }
+
+Outputs:
+  SchedulerFunction:
+    Description: "ARN of the Scheduler function"
+    Value: !GetAtt SchedulerFunction.Arn
+  SchedulerFunctionIamRole:
+    Description: "Implicit IAM Role created for Scheduler function"
+    Value: !GetAtt SchedulerFunctionRole.Arn
