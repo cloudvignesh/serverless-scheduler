@@ -15,6 +15,7 @@ Imagine you're building an application that needs to:
 # Traditional cron job
 0 8 * * * /usr/bin/send-emails.sh
 ```
+
 **Problems:**
 **Scalability:** Can't handle millions of different schedules
 **Single Point of Failure:** Server goes down = all jobs fail
@@ -31,6 +32,7 @@ while True:
         execute(job)
     time.sleep(60)
 ```
+
 **Problems:**
 **Database Load:** Continuous polling hammers your database
 **Inefficient:** Scans entire table every minute
@@ -42,6 +44,7 @@ while True:
 ```bash
 send_email.apply_async(args=['user@email.com'], eta=datetime(2026, 2, 10, 8, 0))
 ```
+
 **Problems:**
 **Infrastructure:** Need to run RabbitMQ/Redis servers
 **Memory:** All scheduled tasks in memory
@@ -78,17 +81,19 @@ EventBridge has TWO different roles:
 - **Amazon EventBridge:** To distribute the jobs. The Lambda function uses Amazon EventBridge as an example to distribute the jobs. The workers which should receive the jobs, must configure the corresponding rules upfront. For testing purposes, this solution comes with a rule which logs all events from the Lambda function into Amazon CloudWatch Logs.
 
 **What are "Workers"?**
+
 **Workers** = The components that DO the actual work
+
 Think of it like a restaurant:
 
-Scheduler = Manager (decides when to cook)
-EventBridge = Waiter (delivers orders)
-Workers = Chefs (actually cook the food)
+- **Scheduler** = Manager (decides when to cook)
+- **EventBridge** = Waiter (delivers orders)
+- **Workers** = Chefs (actually cook the food)
 
 **In this project:**
 
-Worker in demo: CloudWatch Logs (just logs events for debugging)
-Workers in production: Lambda functions that send emails, SMS, update databases, call APIs, etc.
+- **Worker in demo:** CloudWatch Logs (just logs events for debugging)
+- **Workers in production:** Lambda functions that send emails, SMS, update databases, call APIs, etc.
 
 **Example Workers:**
 Each worker listens to EventBridge and only responds to events matching its pattern.
@@ -116,17 +121,21 @@ def handler(event):
 - Go to Cloud Formation Stack
 - Upload a template file from `serverless_stack/cloud_formation_stack/scheduler-eb-dbb-template.yaml`
 - Define a name for your stack. Leave the parameters with the default values for now and select Next.
+
 ![arch](assets/screenshots/create_stack.png)
 
 ![arch](assets/screenshots/stack_name.png)
 
 - At the bottom of the page, `acknowledge` the required Capabilities and select **Create stack**
+
 ![arch](assets/screenshots/acknowelge_stack.png)
 
 - Wait until the status of the stack is `CREATE_COMPLETE`, this can take a minute or two.
+
 ![arch](assets/screenshots/create_complete.png)
 
 ## Step 2: Check Dynamo DB, Eventbridge, Lambda Functions, Cloud Watch (Log Groups) are Created
+
 ![arch](assets/screenshots/jobstable_created.png)
 
 ![arch](assets/screenshots/eventbus_created.png)
@@ -183,6 +192,7 @@ To avoid incurring future charges, delete the CloudFormation Stack and all resou
 
 ## Conclusion
 In this project, we learned how to build a serverless scheduling solution. Using only serverless technologies which scale automatically, don’t require maintenance, and offer a pay as you go pricing model, this scheduler solution can be implemented for use cases with varying throughput requirements for their scheduled jobs. You can also adjust the Lambda function to distribute the jobs with a technology more fitting to your application, as well as to handle recurring tasks. 
+
 ---
 
 **Built by [cloudvignesh](https://github.com/cloudvignesh)**
