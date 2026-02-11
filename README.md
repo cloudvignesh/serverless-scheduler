@@ -10,7 +10,7 @@ Imagine you're building an application that needs to:
 - Execute millions of one-time scheduled tasks
 
 ## Traditional approaches & their problems:
-**Approach 1: Cron Jobs on Servers**
+## Approach 1: Cron Jobs on Servers
 ```bash
 # Traditional cron job
 0 8 * * * /usr/bin/send-emails.sh
@@ -23,7 +23,7 @@ Imagine you're building an application that needs to:
 **Management:** Need to manage server, updates, security
 **One-time jobs:** Cron is for recurring jobs, not flexible one-time schedules
 
-**Approach 2: Cron Jobs on Servers**
+## Approach 2: Cron Jobs on Servers
 ```py
 # Every minute, query database
 while True:
@@ -39,8 +39,8 @@ while True:
 **Cost:** Database always under load
 **Scaling:** Can't handle millions of jobs efficiently
 
-**Approach 3: Task Queues (RabbitMQ, Celery)**
-# Schedule task with Celery
+## Approach 3: Task Queues (RabbitMQ, Celery)
+### Schedule task with Celery
 ```bash
 send_email.apply_async(args=['user@email.com'], eta=datetime(2026, 2, 10, 8, 0))
 ```
